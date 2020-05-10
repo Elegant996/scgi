@@ -14,9 +14,11 @@ package scgi
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -49,7 +51,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// extract dial information from request (should have been embedded by the reverse proxy)	
 	network, address := "tcp", req.URL.Host
-	if dialInfo, ok := getDialInfo(req.URL.String()); ok {
+	if dialInfo, ok := getDialInfo(req.URL); ok {
 		network = dialInfo.network
 		address = dialInfo.address
 	}
@@ -76,6 +78,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	var resp *http.Response
 	switch req.Method {
+	case http.MethodHead:
+		resp, err = scgiBackend.Head(env)
 	case http.MethodGet:
 		resp, err = scgiBackend.Get(env, req.Body, contentLength)
 	default:
@@ -87,16 +91,64 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // buildEnv returns a set of CGI environment variables for the request.
 func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
+	var env map[string]string
+
+	// Separate remote IP and port; more lenient than net.SplitHostPort
+	var ip, port string
+	if idx := strings.LastIndex(req.RemoteAddr, ":"); idx > -1 {
+		ip = req.RemoteAddr[:idx]
+		port = req.RemoteAddr[idx+1:]
+	} else {
+		ip = req.RemoteAddr
+	}
+
+	// Remove [] from IPv6 addresses
+	ip = strings.Replace(ip, "[", "", 1)
+	ip = strings.Replace(ip, "]", "", 1)
+
+	reqURL := req.URL
+
+	requestScheme := "http"
+
+	reqHost, reqPort, err := net.SplitHostPort(req.Host)
+	if err != nil {
+		// whatever, just assume there was no port
+		reqHost = req.Host
+	}
+
 	// Some variables are unused but cleared explicitly to prevent
 	// the parent environment from interfering.
-	env := map[string]string{
-		// Variables defined in SCGI spec
+	env = map[string]string{
+		// Variables defined in CGI 1.1 spec
+		"AUTH_TYPE":         "", // Not used
 		"CONTENT_LENGTH":    req.Header.Get("Content-Length"),
+		"CONTENT_TYPE":      req.Header.Get("Content-Type"),
+		"GATEWAY_INTERFACE": "CGI/1.1",
+		"PATH_INFO":         "", // Not used
+		"QUERY_STRING":      req.URL.RawQuery,
+		"REMOTE_ADDR":       ip,
+		"REMOTE_HOST":       ip, // For speed, remote host lookups disabled
+		"REMOTE_PORT":       port,
+		"REMOTE_IDENT":      "", // Not used
+		"REMOTE_USER":       "", // TODO: once there are authentication handlers, populate this
 		"REQUEST_METHOD":    req.Method,
+		"REQUEST_SCHEME":    requestScheme,
+		"SERVER_NAME":       reqHost,
+		"SERVER_PORT":       reqPort,
 		"SERVER_PROTOCOL":   req.Proto,
-		"SCGI":              "1",
+
+		// Other variables
+		"HTTP_HOST":       req.Host, // added here, since not always part of headers
+		"REQUEST_URI":     reqURL.RequestURI(),
+		"SCGI":            "1", // Required
 	}
-	
+
+	// Add all HTTP headers to env variables
+	for field, val := range req.Header {
+		header := strings.ToUpper(field)
+		header = headerNameReplacer.Replace(header)
+		env["HTTP_"+header] = strings.Join(val, ", ")
+	}
 	return env, nil
 }
 
@@ -105,8 +157,7 @@ type DialInfo struct {
 	address string
 }
 
-func getDialInfo(s string) (*DialInfo, bool) {
-	u, _ := url.Parse(s)
+func getDialInfo(u *url.URL) (*DialInfo, bool) {
 	if u.Host == "" {
 		return &DialInfo{"unix", u.Path}, true
 	}
@@ -114,4 +165,7 @@ func getDialInfo(s string) (*DialInfo, bool) {
 	return nil, false
 }
 
+var headerNameReplacer = strings.NewReplacer(" ", "_", "-", "_")
+
+// Interface guards
 var _ http.RoundTripper = (*Transport)(nil)

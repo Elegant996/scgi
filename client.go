@@ -189,6 +189,15 @@ func (c *SCGIClient) Get(p map[string]string, body io.Reader, l int64) (resp *ht
 	return c.Request(p, body)
 }
 
+// Head issues a HEAD request to the scgi responder.
+func (c *SCGIClient) Head(p map[string]string) (resp *http.Response, err error) {
+
+	p["REQUEST_METHOD"] = "HEAD"
+	p["CONTENT_LENGTH"] = "0"
+
+	return c.Request(p, nil)
+}
+
 // Post issues a POST request to the scgi responder. with request body
 // in the format that bodyType specified
 func (c *SCGIClient) Post(p map[string]string, method string, body io.Reader, l int64) (resp *http.Response, err error) {
