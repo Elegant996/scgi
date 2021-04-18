@@ -176,7 +176,7 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 			env["SSL_PROTOCOL"] = v
 		}
 		// and pass the cipher suite in a manner compatible with apache's mod_ssl
-		env["SSL_CIPHER"] = req.TLS.CipherSuite.Name
+		env["SSL_CIPHER"] = tls.CipherSuiteName(req.TLS.CipherSuite)
 	}
 
 	// Add all HTTP headers to env variables
