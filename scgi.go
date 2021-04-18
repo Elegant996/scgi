@@ -13,6 +13,7 @@ package scgi
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -105,14 +106,8 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 	// Remove [] from IPv6 addresses
 	ip = strings.Replace(ip, "[", "", 1)
 	ip = strings.Replace(ip, "]", "", 1)
-
-	// make sure file root is absolute
-	root, err := filepath.Abs(repl.ReplaceAll(t.Root, "."))
-	if err != nil {
-		return nil, err
-	}
 	
-	fpath := r.URL.Path
+	fpath := req.URL.Path
 	scriptName := fpath
 
 	docURI := fpath
@@ -125,9 +120,6 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 		// Strip PATH_INFO from SCRIPT_NAME
 		scriptName = strings.TrimSuffix(scriptName, pathInfo)
 	}
-
-	// SCRIPT_FILENAME is the absolute path of SCRIPT_NAME
-	scriptFilename := filepath.Join(root, scriptName)
 
 	// Ensure the SCRIPT_NAME has a leading slash for compliance with RFC3875
 	// Info: https://tools.ietf.org/html/rfc3875#section-4.1.13
@@ -169,20 +161,11 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 		"SERVER_PROTOCOL":   req.Proto,
 
 		// Other variables
-		"DOCUMENT_ROOT":   root,
 		"DOCUMENT_URI":    docURI,
 		"HTTP_HOST":       req.Host, // added here, since not always part of headers
 		"REQUEST_URI":     reqURL.RequestURI(),
-		"SCRIPT_FILENAME": scriptFilename,
 		"SCRIPT_NAME":     scriptName,
 		"SCGI":            "1", // Required
-	}
-	
-	// compliance with the CGI specification requires that
-	// PATH_TRANSLATED should only exist if PATH_INFO is defined.
-	// Info: https://www.ietf.org/rfc/rfc3875 Page 14
-	if env["PATH_INFO"] != "" {
-		env["PATH_TRANSLATED"] = filepath.Join(root, pathInfo) // Info: http://www.oreilly.com/openbook/cgi/ch02_04.html
 	}
 
 	// compliance with the CGI specification requires that
