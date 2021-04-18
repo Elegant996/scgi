@@ -106,9 +106,41 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 	ip = strings.Replace(ip, "[", "", 1)
 	ip = strings.Replace(ip, "]", "", 1)
 
+	// make sure file root is absolute
+	root, err := filepath.Abs(repl.ReplaceAll(t.Root, "."))
+	if err != nil {
+		return nil, err
+	}
+	
+	fpath := r.URL.Path
+	scriptName := fpath
+
+	docURI := fpath
+	// split "actual path" from "path info" if configured
+	var pathInfo string
+	if splitPos := t.splitPos(fpath); splitPos > -1 {
+		docURI = fpath[:splitPos]
+		pathInfo = fpath[splitPos:]
+		
+		// Strip PATH_INFO from SCRIPT_NAME
+		scriptName = strings.TrimSuffix(scriptName, pathInfo)
+	}
+
+	// SCRIPT_FILENAME is the absolute path of SCRIPT_NAME
+	scriptFilename := filepath.Join(root, scriptName)
+
+	// Ensure the SCRIPT_NAME has a leading slash for compliance with RFC3875
+	// Info: https://tools.ietf.org/html/rfc3875#section-4.1.13
+	if scriptName != "" && !strings.HasPrefix(scriptName, "/") {
+		scriptName = "/" + scriptName
+	}
+
 	reqURL := req.URL
 
 	requestScheme := "http"
+	if req.TLS != nil {
+		requestScheme = "https"
+	}
 
 	reqHost, reqPort, err := net.SplitHostPort(req.Host)
 	if err != nil {
@@ -124,23 +156,58 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 		"CONTENT_LENGTH":    req.Header.Get("Content-Length"),
 		"CONTENT_TYPE":      req.Header.Get("Content-Type"),
 		"GATEWAY_INTERFACE": "CGI/1.1",
-		"PATH_INFO":         "", // Not used
+		"PATH_INFO":         pathInfo,
 		"QUERY_STRING":      req.URL.RawQuery,
 		"REMOTE_ADDR":       ip,
 		"REMOTE_HOST":       ip, // For speed, remote host lookups disabled
 		"REMOTE_PORT":       port,
 		"REMOTE_IDENT":      "", // Not used
-		"REMOTE_USER":       "", // TODO: once there are authentication handlers, populate this
+		"REMOTE_USER":       "", // Not used
 		"REQUEST_METHOD":    req.Method,
 		"REQUEST_SCHEME":    requestScheme,
 		"SERVER_NAME":       reqHost,
-		"SERVER_PORT":       reqPort,
 		"SERVER_PROTOCOL":   req.Proto,
 
 		// Other variables
+		"DOCUMENT_ROOT":   root,
+		"DOCUMENT_URI":    docURI,
 		"HTTP_HOST":       req.Host, // added here, since not always part of headers
 		"REQUEST_URI":     reqURL.RequestURI(),
+		"SCRIPT_FILENAME": scriptFilename,
+		"SCRIPT_NAME":     scriptName,
 		"SCGI":            "1", // Required
+	}
+	
+	// compliance with the CGI specification requires that
+	// PATH_TRANSLATED should only exist if PATH_INFO is defined.
+	// Info: https://www.ietf.org/rfc/rfc3875 Page 14
+	if env["PATH_INFO"] != "" {
+		env["PATH_TRANSLATED"] = filepath.Join(root, pathInfo) // Info: http://www.oreilly.com/openbook/cgi/ch02_04.html
+	}
+
+	// compliance with the CGI specification requires that
+	// SERVER_PORT should only exist if it's a valid numeric value.
+	// Info: https://www.ietf.org/rfc/rfc3875 Page 18
+	if reqPort != "" {
+		env["SERVER_PORT"] = reqPort
+	}
+
+	// Some web apps rely on knowing HTTPS or not
+	if req.TLS != nil {
+		env["HTTPS"] = "on"
+		// and pass the protocol details in a manner compatible with apache's mod_ssl
+		// (which is why these have a SSL_ prefix and not TLS_).
+		v, ok := tlsProtocolStrings[req.TLS.Version]
+		if ok {
+			env["SSL_PROTOCOL"] = v
+		}
+		// and pass the cipher suite in a manner compatible with apache's mod_ssl
+		env["SSL_CIPHER"] = req.TLS.CipherSuite
+	}
+
+	// Add env variables from config (with support for placeholders in values)
+	for key, value := range t.EnvVars {
+		env[key] = repl.ReplaceAll(value, "")
 	}
 
 	// Add all HTTP headers to env variables
@@ -150,6 +217,23 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 		env["HTTP_"+header] = strings.Join(val, ", ")
 	}
 	return env, nil
+}
+
+// splitPos returns the index where path should
+// be split based on t.SplitPath.
+func (t Transport) splitPos(path string) int {
+	// TODO: handle case sensitive paths
+	if len(t.SplitPath) == 0 {
+		return 0
+	}
+
+	lowerPath := strings.ToLower(path)
+	for _, split := range t.SplitPath {
+		if idx := strings.Index(lowerPath, strings.ToLower(split)); idx > -1 {
+			return idx + len(split)
+		}
+	}
+	return -1
 }
 
 type DialInfo struct {
@@ -163,6 +247,14 @@ func getDialInfo(u *url.URL) (*DialInfo, bool) {
 	}
 	
 	return nil, false
+}
+
+// Map of supported protocols to Apache ssl_mod format
+var tlsProtocolStrings = map[uint16]string{
+	tls.VersionTLS10: "TLSv1",
+	tls.VersionTLS11: "TLSv1.1",
+	tls.VersionTLS12: "TLSv1.2",
+	tls.VersionTLS13: "TLSv1.3",
 }
 
 var headerNameReplacer = strings.NewReplacer(" ", "_", "-", "_")
