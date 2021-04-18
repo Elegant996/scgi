@@ -111,15 +111,6 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 	scriptName := fpath
 
 	docURI := fpath
-	// split "actual path" from "path info" if configured
-	var pathInfo string
-	if splitPos := t.splitPos(fpath); splitPos > -1 {
-		docURI = fpath[:splitPos]
-		pathInfo = fpath[splitPos:]
-		
-		// Strip PATH_INFO from SCRIPT_NAME
-		scriptName = strings.TrimSuffix(scriptName, pathInfo)
-	}
 
 	// Ensure the SCRIPT_NAME has a leading slash for compliance with RFC3875
 	// Info: https://tools.ietf.org/html/rfc3875#section-4.1.13
@@ -148,7 +139,7 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 		"CONTENT_LENGTH":    req.Header.Get("Content-Length"),
 		"CONTENT_TYPE":      req.Header.Get("Content-Type"),
 		"GATEWAY_INTERFACE": "CGI/1.1",
-		"PATH_INFO":         pathInfo,
+		"PATH_INFO":         "", // Not used
 		"QUERY_STRING":      req.URL.RawQuery,
 		"REMOTE_ADDR":       ip,
 		"REMOTE_HOST":       ip, // For speed, remote host lookups disabled
@@ -185,12 +176,7 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 			env["SSL_PROTOCOL"] = v
 		}
 		// and pass the cipher suite in a manner compatible with apache's mod_ssl
-		env["SSL_CIPHER"] = req.TLS.CipherSuite
-	}
-
-	// Add env variables from config (with support for placeholders in values)
-	for key, value := range t.EnvVars {
-		env[key] = repl.ReplaceAll(value, "")
+		env["SSL_CIPHER"] = req.TLS.CipherSuite.Name
 	}
 
 	// Add all HTTP headers to env variables
@@ -200,23 +186,6 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 		env["HTTP_"+header] = strings.Join(val, ", ")
 	}
 	return env, nil
-}
-
-// splitPos returns the index where path should
-// be split based on t.SplitPath.
-func (t Transport) splitPos(path string) int {
-	// TODO: handle case sensitive paths
-	if len(t.SplitPath) == 0 {
-		return 0
-	}
-
-	lowerPath := strings.ToLower(path)
-	for _, split := range t.SplitPath {
-		if idx := strings.Index(lowerPath, strings.ToLower(split)); idx > -1 {
-			return idx + len(split)
-		}
-	}
-	return -1
 }
 
 type DialInfo struct {
