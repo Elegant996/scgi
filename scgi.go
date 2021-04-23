@@ -26,33 +26,33 @@ import (
 // Transport facilitates SCGI communication.
 type Transport struct {
 	// The duration used to set a deadline when connecting to an upstream.
-	DialTimeout time.Duration
+	dialTimeout time.Duration
 
 	// The duration used to set a deadline when reading from the SCGI server.
-	ReadTimeout time.Duration
+	readTimeout time.Duration
 
 	// The duration used to set a deadline when sending to the SCGI server.
-	WriteTimeout time.Duration
+	writeTimeout time.Duration
 }
 
 // RoundTrip implements http.RoundTripper.
-func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {	
-	env, err := t.buildEnv(req)
+func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {	
+	env, err := t.buildEnv(r)
 	if err != nil {
 		return nil, fmt.Errorf("building environment: %v", err)
 	}
 
 	// TODO: doesn't dialer have a Timeout field?
-	ctx := req.Context()
-	if t.DialTimeout > 0 {
+	ctx := r.Context()
+	if t.dialTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(t.DialTimeout))
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(t.dialTimeout))
 		defer cancel()
 	}
 
 	// extract dial information from request (should have been embedded by the reverse proxy)	
-	network, address := "tcp", req.URL.Host
-	if dialInfo, ok := getDialInfo(req.URL); ok {
+	network, address := "tcp", r.URL.Host
+	if dialInfo, ok := getDialInfo(r.URL); ok {
 		network = dialInfo.network
 		address = dialInfo.address
 	}
@@ -65,49 +65,51 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// scgiBackend gets closed when response body is closed (see clientCloser)
 
 	// read/write timeouts
-	if err := scgiBackend.SetReadTimeout(t.ReadTimeout); err != nil {
+	if err := scgiBackend.SetReadTimeout(t.readTimeout); err != nil {
 		return nil, fmt.Errorf("setting read timeout: %v", err)
 	}
-	if err := scgiBackend.SetWriteTimeout(t.WriteTimeout); err != nil {
+	if err := scgiBackend.SetWriteTimeout(t.writeTimeout); err != nil {
 		return nil, fmt.Errorf("setting write timeout: %v", err)
 	}
 
-	contentLength := req.ContentLength
+	contentLength := r.ContentLength
 	if contentLength == 0 {
-		contentLength, _ = strconv.ParseInt(req.Header.Get("Content-Length"), 10, 64)
+		contentLength, _ = strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
 	}
 
 	var resp *http.Response
-	switch req.Method {
+	switch r.Method {
 	case http.MethodHead:
 		resp, err = scgiBackend.Head(env)
 	case http.MethodGet:
-		resp, err = scgiBackend.Get(env, req.Body, contentLength)
+		resp, err = scgiBackend.Get(env, r.Body, contentLength)
+	case http.MethodOptions:
+		resp, err = scgiBackend.Options(env)
 	default:
-		resp, err = scgiBackend.Post(env, req.Method, req.Body, contentLength)
+		resp, err = scgiBackend.Post(env, r.Method, r.Header.Get("Content-Type"), r.Body, contentLength)
 	}
 
 	return resp, err
 }
 
 // buildEnv returns a set of CGI environment variables for the request.
-func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
+func (t Transport) buildEnv(r *http.Request) (map[string]string, error) {
 	var env map[string]string
 
 	// Separate remote IP and port; more lenient than net.SplitHostPort
 	var ip, port string
-	if idx := strings.LastIndex(req.RemoteAddr, ":"); idx > -1 {
-		ip = req.RemoteAddr[:idx]
-		port = req.RemoteAddr[idx+1:]
+	if idx := strings.LastIndex(r.RemoteAddr, ":"); idx > -1 {
+		ip = r.RemoteAddr[:idx]
+		port = r.RemoteAddr[idx+1:]
 	} else {
-		ip = req.RemoteAddr
+		ip = r.RemoteAddr
 	}
 
 	// Remove [] from IPv6 addresses
 	ip = strings.Replace(ip, "[", "", 1)
 	ip = strings.Replace(ip, "]", "", 1)
 	
-	fpath := req.URL.Path
+	fpath := r.URL.Path
 	scriptName := fpath
 
 	docURI := fpath
@@ -118,17 +120,17 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 		scriptName = "/" + scriptName
 	}
 
-	reqURL := req.URL
+	reqURL := r.URL
 
 	requestScheme := "http"
-	if req.TLS != nil {
+	if r.TLS != nil {
 		requestScheme = "https"
 	}
 
-	reqHost, reqPort, err := net.SplitHostPort(req.Host)
+	reqHost, reqPort, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		// whatever, just assume there was no port
-		reqHost = req.Host
+		reqHost = r.Host
 	}
 
 	// Some variables are unused but cleared explicitly to prevent
@@ -136,24 +138,24 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 	env = map[string]string{
 		// Variables defined in CGI 1.1 spec
 		"AUTH_TYPE":         "", // Not used
-		"CONTENT_LENGTH":    req.Header.Get("Content-Length"),
-		"CONTENT_TYPE":      req.Header.Get("Content-Type"),
+		"CONTENT_LENGTH":    r.Header.Get("Content-Length"),
+		"CONTENT_TYPE":      r.Header.Get("Content-Type"),
 		"GATEWAY_INTERFACE": "CGI/1.1",
 		"PATH_INFO":         "", // Not used
-		"QUERY_STRING":      req.URL.RawQuery,
+		"QUERY_STRING":      r.URL.RawQuery,
 		"REMOTE_ADDR":       ip,
 		"REMOTE_HOST":       ip, // For speed, remote host lookups disabled
 		"REMOTE_PORT":       port,
 		"REMOTE_IDENT":      "", // Not used
 		"REMOTE_USER":       "", // Not used
-		"REQUEST_METHOD":    req.Method,
+		"REQUEST_METHOD":    r.Method,
 		"REQUEST_SCHEME":    requestScheme,
 		"SERVER_NAME":       reqHost,
-		"SERVER_PROTOCOL":   req.Proto,
+		"SERVER_PROTOCOL":   r.Proto,
 
 		// Other variables
 		"DOCUMENT_URI":    docURI,
-		"HTTP_HOST":       req.Host, // added here, since not always part of headers
+		"HTTP_HOST":       r.Host, // added here, since not always part of headers
 		"REQUEST_URI":     reqURL.RequestURI(),
 		"SCRIPT_NAME":     scriptName,
 		"SCGI":            "1", // Required
@@ -167,20 +169,20 @@ func (t Transport) buildEnv(req *http.Request) (map[string]string, error) {
 	}
 
 	// Some web apps rely on knowing HTTPS or not
-	if req.TLS != nil {
+	if r.TLS != nil {
 		env["HTTPS"] = "on"
 		// and pass the protocol details in a manner compatible with apache's mod_ssl
 		// (which is why these have a SSL_ prefix and not TLS_).
-		v, ok := tlsProtocolStrings[req.TLS.Version]
+		v, ok := tlsProtocolStrings[r.TLS.Version]
 		if ok {
 			env["SSL_PROTOCOL"] = v
 		}
 		// and pass the cipher suite in a manner compatible with apache's mod_ssl
-		env["SSL_CIPHER"] = tls.CipherSuiteName(req.TLS.CipherSuite)
+		env["SSL_CIPHER"] = tls.CipherSuiteName(r.TLS.CipherSuite)
 	}
 
 	// Add all HTTP headers to env variables
-	for field, val := range req.Header {
+	for field, val := range r.Header {
 		header := strings.ToUpper(field)
 		header = headerNameReplacer.Replace(header)
 		env["HTTP_"+header] = strings.Join(val, ", ")
