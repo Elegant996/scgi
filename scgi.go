@@ -1,18 +1,18 @@
-// Package scgi provides a SCGI transport.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// SCGI queries can be sent by specifying the host and port over TCP
-// or through Unix domain sockets.
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// The URLs look like this:
-//
-//     http://host[:port]/path (TCP)
-//     http:///tmp/domain.sock (Unix domain socket)
-//
-// where the absolute path is provided for Unix domain sockets.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package scgi
 
 import (
-	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -36,39 +36,44 @@ type Transport struct {
 }
 
 // RoundTrip implements http.RoundTripper.
-func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {	
+func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {	
 	env, err := t.buildEnv(r)
 	if err != nil {
 		return nil, fmt.Errorf("building environment: %v", err)
 	}
 
-	// TODO: doesn't dialer have a Timeout field?
 	ctx := r.Context()
-	if t.dialTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(t.dialTimeout))
-		defer cancel()
-	}
 
-	// extract dial information from request (should have been embedded by the reverse proxy)	
+	// extract dial information from request
 	network, address := "tcp", r.URL.Host
 	if dialInfo, ok := getDialInfo(r.URL); ok {
 		network = dialInfo.network
 		address = dialInfo.address
 	}
 
-	scgiBackend, err := DialContext(ctx, network, address)
+	// connect to the backend
+	dialer := net.Dialer{Timeout: time.Duration(t.dialTimeout)}
+	conn, err := dialer.DialContext(ctx, network, address)
 	if err != nil {
-		// TODO: wrap in a special error type if the dial failed, so retries can happen if enabled
 		return nil, fmt.Errorf("dialing backend: %v", err)
 	}
-	// scgiBackend gets closed when response body is closed (see clientCloser)
+	defer func() {
+		// conn will be closed with the response body unless there's an error
+		if err != nil {
+			conn.Close()
+		}
+	}()
+
+	// create the client that will facilitate the protocol
+	client := client{
+		rwc:    conn,
+	}
 
 	// read/write timeouts
-	if err := scgiBackend.SetReadTimeout(t.readTimeout); err != nil {
+	if err := client.SetReadTimeout(t.readTimeout); err != nil {
 		return nil, fmt.Errorf("setting read timeout: %v", err)
 	}
-	if err := scgiBackend.SetWriteTimeout(t.writeTimeout); err != nil {
+	if err := client.SetWriteTimeout(t.writeTimeout); err != nil {
 		return nil, fmt.Errorf("setting write timeout: %v", err)
 	}
 
@@ -80,21 +85,24 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	var resp *http.Response
 	switch r.Method {
 	case http.MethodHead:
-		resp, err = scgiBackend.Head(env)
+		resp, err = client.Head(env)
 	case http.MethodGet:
-		resp, err = scgiBackend.Get(env, r.Body, contentLength)
+		resp, err = client.Get(env, r.Body, contentLength)
 	case http.MethodOptions:
-		resp, err = scgiBackend.Options(env)
+		resp, err = client.Options(env)
 	default:
-		resp, err = scgiBackend.Post(env, r.Method, r.Header.Get("Content-Type"), r.Body, contentLength)
+		resp, err = client.Post(env, r.Method, r.Header.Get("Content-Type"), r.Body, contentLength)
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	return resp, err
+	return resp, nil
 }
 
 // buildEnv returns a set of CGI environment variables for the request.
-func (t Transport) buildEnv(r *http.Request) (map[string]string, error) {
-	var env map[string]string
+func (t Transport) buildEnv(r *http.Request) (envVars, error) {
+	var env envVars
 
 	// Separate remote IP and port; more lenient than net.SplitHostPort
 	var ip, port string
@@ -135,7 +143,7 @@ func (t Transport) buildEnv(r *http.Request) (map[string]string, error) {
 
 	// Some variables are unused but cleared explicitly to prevent
 	// the parent environment from interfering.
-	env = map[string]string{
+	env = envVars{
 		// Variables defined in CGI 1.1 spec
 		"AUTH_TYPE":         "", // Not used
 		"CONTENT_LENGTH":    r.Header.Get("Content-Length"),
@@ -154,18 +162,25 @@ func (t Transport) buildEnv(r *http.Request) (map[string]string, error) {
 		"SERVER_PROTOCOL":   r.Proto,
 
 		// Other variables
+		"DOCUMENT_ROOT":   "", // Not used
 		"DOCUMENT_URI":    docURI,
 		"HTTP_HOST":       r.Host, // added here, since not always part of headers
 		"REQUEST_URI":     reqURL.RequestURI(),
-		"SCRIPT_NAME":     scriptName,
 		"SCGI":            "1", // Required
+		"SCRIPT_FILENAME": "", // Not used
+		"SCRIPT_NAME":     scriptName,
 	}
 
 	// compliance with the CGI specification requires that
-	// SERVER_PORT should only exist if it's a valid numeric value.
-	// Info: https://www.ietf.org/rfc/rfc3875 Page 18
+	// the SERVER_PORT variable MUST be set to the TCP/IP port number on which this request is received from the client
+	// even if the port is the default port for the scheme and could otherwise be omitted from a URI.
+	// https://tools.ietf.org/html/rfc3875#section-4.1.15
 	if reqPort != "" {
 		env["SERVER_PORT"] = reqPort
+	} else if requestScheme == "http" {
+		env["SERVER_PORT"] = "80"
+	} else if requestScheme == "https" {
+		env["SERVER_PORT"] = "443"
 	}
 
 	// Some web apps rely on knowing HTTPS or not
@@ -190,6 +205,10 @@ func (t Transport) buildEnv(r *http.Request) (map[string]string, error) {
 	return env, nil
 }
 
+// envVars is a simple type for environment variables.
+type envVars map[string]string
+
+// DialInfo is a simple type containing connection info.
 type DialInfo struct {
 	network string
 	address string
