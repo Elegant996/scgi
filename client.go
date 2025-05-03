@@ -21,18 +21,17 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/textproto"
-	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // StatusRegex describes the pattern for a raw HTTP Response code.
@@ -42,7 +41,7 @@ var StatusRegex = regexp.MustCompile("(?i)(?:Status:|HTTP\\/[\\d\\.]+)\\s+(\\d{3
 // interfacing external applications with Web servers.
 type client struct {
 	rwc net.Conn
-	// keepAlive bool // TODO: implement
+	logger *zap.Logger
 }
 
 // Do made the request and returns a io.Reader that translates the data read
@@ -85,9 +84,26 @@ type clientCloser struct {
 	io.Reader
 
 	status int
+	logger *zap.Logger
 }
 
-func (c clientCloser) Close() error { return c.rwc.Close() }
+func (s clientCloser) Close() error {
+	stderr := s.r.stderr.Bytes()
+	if len(stderr) == 0 {
+		return s.rwc.Close()
+	}
+
+	logLevel := zapcore.WarnLevel
+	if s.status >= 400 {
+		logLevel = zapcore.ErrorLevel
+	}
+
+	if c := s.logger.Check(logLevel, "stderr"); c != nil {
+		c.Write(zap.ByteString("body", stderr))
+	}
+
+	return s.rwc.Close()
+}
 
 // Request returns a HTTP Response with Header and Body
 // from scgi responder
@@ -151,6 +167,7 @@ func (c *client) Request(p map[string]string, req io.Reader) (resp *http.Respons
 		rwc:    c.rwc,
 		Reader: rb,
 		status: resp.StatusCode,
+		logger: c.logger,
 	}
 	if chunked(resp.TransferEncoding) {
 		closer.Reader = httputil.NewChunkedReader(rb)
@@ -162,7 +179,6 @@ func (c *client) Request(p map[string]string, req io.Reader) (resp *http.Respons
 
 // Get issues a GET request to the scgi responder.
 func (c *client) Get(p map[string]string, body io.Reader, l int64) (resp *http.Response, err error) {
-
 	p["REQUEST_METHOD"] = "GET"
 	p["CONTENT_LENGTH"] = strconv.FormatInt(l, 10)
 
@@ -171,7 +187,6 @@ func (c *client) Get(p map[string]string, body io.Reader, l int64) (resp *http.R
 
 // Head issues a HEAD request to the scgi responder.
 func (c *client) Head(p map[string]string) (resp *http.Response, err error) {
-
 	p["REQUEST_METHOD"] = "HEAD"
 	p["CONTENT_LENGTH"] = "0"
 
@@ -180,7 +195,6 @@ func (c *client) Head(p map[string]string) (resp *http.Response, err error) {
 
 // Options issues an OPTIONS request to the scgi responder.
 func (c *client) Options(p map[string]string) (resp *http.Response, err error) {
-
 	p["REQUEST_METHOD"] = "OPTIONS"
 	p["CONTENT_LENGTH"] = "0"
 

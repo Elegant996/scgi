@@ -12,8 +12,13 @@
 
 package scgi
 
+import (
+	"bytes"
+)
+
 type streamReader struct {
 	c      *client
+	stderr bytes.Buffer
 }
 
 func (r *streamReader) Read(p []byte) (n int, err error) {

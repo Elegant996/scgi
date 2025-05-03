@@ -21,6 +21,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Transport facilitates SCGI communication.
@@ -33,6 +36,8 @@ type Transport struct {
 
 	// The duration used to set a deadline when sending to the SCGI server.
 	writeTimeout time.Duration
+
+	logger	*zap.Logger
 }
 
 // RoundTrip implements http.RoundTripper.
@@ -51,6 +56,13 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		address = dialInfo.address
 	}
 
+	logger := t.logger
+	if c := t.logger.Check(zapcore.DebugLevel, "roundtrip"); c != nil {
+ 		c.Write(
+ 			zap.String("dial", address),
+ 		)
+ 	}
+
 	// connect to the backend
 	dialer := net.Dialer{Timeout: time.Duration(t.dialTimeout)}
 	conn, err := dialer.DialContext(ctx, network, address)
@@ -67,6 +79,7 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// create the client that will facilitate the protocol
 	client := client{
 		rwc:    conn,
+		logger: logger,
 	}
 
 	// read/write timeouts
