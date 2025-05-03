@@ -165,6 +165,7 @@ func (c *client) Request(p map[string]string, req io.Reader) (resp *http.Respons
 	// wrap the response body in our closer
 	closer := clientCloser{
 		rwc:    c.rwc,
+		r:      r.(*streamReader),
 		Reader: rb,
 		status: resp.StatusCode,
 		logger: c.logger,
