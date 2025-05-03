@@ -29,13 +29,13 @@ import (
 // Transport facilitates SCGI communication.
 type Transport struct {
 	// The duration used to set a deadline when connecting to an upstream.
-	dialTimeout time.Duration
+	DialTimeout time.Duration
 
 	// The duration used to set a deadline when reading from the SCGI server.
-	readTimeout time.Duration
+	ReadTimeout time.Duration
 
 	// The duration used to set a deadline when sending to the SCGI server.
-	writeTimeout time.Duration
+	WriteTimeout time.Duration
 
 	logger	*zap.Logger
 }
@@ -64,7 +64,7 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
  	}
 
 	// connect to the backend
-	dialer := net.Dialer{Timeout: time.Duration(t.dialTimeout)}
+	dialer := net.Dialer{Timeout: time.Duration(t.DialTimeout)}
 	conn, err := dialer.DialContext(ctx, network, address)
 	if err != nil {
 		return nil, fmt.Errorf("dialing backend: %v", err)
@@ -83,10 +83,10 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	// read/write timeouts
-	if err := client.SetReadTimeout(t.readTimeout); err != nil {
+	if err := client.SetReadTimeout(t.ReadTimeout); err != nil {
 		return nil, fmt.Errorf("setting read timeout: %v", err)
 	}
-	if err := client.SetWriteTimeout(t.writeTimeout); err != nil {
+	if err := client.SetWriteTimeout(t.WriteTimeout); err != nil {
 		return nil, fmt.Errorf("setting write timeout: %v", err)
 	}
 
