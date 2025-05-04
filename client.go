@@ -21,18 +21,18 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/textproto"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // StatusRegex describes the pattern for a raw HTTP Response code.
@@ -42,7 +42,7 @@ var StatusRegex = regexp.MustCompile("(?i)(?:Status:|HTTP\\/[\\d\\.]+)\\s+(\\d{3
 // interfacing external applications with Web servers.
 type client struct {
 	rwc net.Conn
-	// keepAlive bool // TODO: implement
+	logger *zap.Logger
 }
 
 // Do made the request and returns a io.Reader that translates the data read
@@ -82,12 +82,30 @@ func (c *client) Do(p map[string]string, req io.Reader) (r io.Reader, err error)
 // that closes the client connection.
 type clientCloser struct {
 	rwc net.Conn
+	r   *streamReader
 	io.Reader
 
 	status int
+	logger *zap.Logger
 }
 
-func (c clientCloser) Close() error { return c.rwc.Close() }
+func (s clientCloser) Close() error {
+	stderr := s.r.stderr.Bytes()
+	if len(stderr) == 0 {
+		return s.rwc.Close()
+	}
+
+	logLevel := zapcore.WarnLevel
+	if s.status >= 400 {
+		logLevel = zapcore.ErrorLevel
+	}
+
+	if c := s.logger.Check(logLevel, "stderr"); c != nil {
+		c.Write(zap.ByteString("body", stderr))
+	}
+
+	return s.rwc.Close()
+}
 
 // Request returns a HTTP Response with Header and Body
 // from scgi responder
@@ -149,8 +167,10 @@ func (c *client) Request(p map[string]string, req io.Reader) (resp *http.Respons
 	// wrap the response body in our closer
 	closer := clientCloser{
 		rwc:    c.rwc,
+		r:      r.(*streamReader),
 		Reader: rb,
 		status: resp.StatusCode,
+		logger: c.logger,
 	}
 	if chunked(resp.TransferEncoding) {
 		closer.Reader = httputil.NewChunkedReader(rb)
@@ -162,7 +182,6 @@ func (c *client) Request(p map[string]string, req io.Reader) (resp *http.Respons
 
 // Get issues a GET request to the scgi responder.
 func (c *client) Get(p map[string]string, body io.Reader, l int64) (resp *http.Response, err error) {
-
 	p["REQUEST_METHOD"] = "GET"
 	p["CONTENT_LENGTH"] = strconv.FormatInt(l, 10)
 
@@ -171,7 +190,6 @@ func (c *client) Get(p map[string]string, body io.Reader, l int64) (resp *http.R
 
 // Head issues a HEAD request to the scgi responder.
 func (c *client) Head(p map[string]string) (resp *http.Response, err error) {
-
 	p["REQUEST_METHOD"] = "HEAD"
 	p["CONTENT_LENGTH"] = "0"
 
@@ -180,7 +198,6 @@ func (c *client) Head(p map[string]string) (resp *http.Response, err error) {
 
 // Options issues an OPTIONS request to the scgi responder.
 func (c *client) Options(p map[string]string) (resp *http.Response, err error) {
-
 	p["REQUEST_METHOD"] = "OPTIONS"
 	p["CONTENT_LENGTH"] = "0"
 
@@ -215,48 +232,6 @@ func (c *client) Post(p map[string]string, method string, bodyType string, body 
 func (c *client) PostForm(p map[string]string, data url.Values) (resp *http.Response, err error) {
 	body := bytes.NewReader([]byte(data.Encode()))
 	return c.Post(p, "POST", "application/x-www-form-urlencoded", body, int64(body.Len()))
-}
-
-// PostFile issues a POST to the scgi responder in multipart(RFC 2046) standard,
-// with form as a string key to a list values (url.Values),
-// and/or with file as a string key to a list file path.
-func (c *client) PostFile(p map[string]string, data url.Values, file map[string]string) (resp *http.Response, err error) {
-	buf := &bytes.Buffer{}
-	writer := multipart.NewWriter(buf)
-	bodyType := writer.FormDataContentType()
-
-	for key, val := range data {
-		for _, v0 := range val {
-			err = writer.WriteField(key, v0)
-			if err != nil {
-				return
-			}
-		}
-	}
-
-	for key, val := range file {
-		fd, e := os.Open(val)
-		if e != nil {
-			return nil, e
-		}
-		defer fd.Close()
-
-		part, e := writer.CreateFormFile(key, filepath.Base(val))
-		if e != nil {
-			return nil, e
-		}
-		_, err = io.Copy(part, fd)
-		if err != nil {
-			return
-		}
-	}
-
-	err = writer.Close()
-	if err != nil {
-		return
-	}
-
-	return c.Post(p, "POST", bodyType, buf, int64(buf.Len()))
 }
 
 // SetReadTimeout sets the read timeout for future calls that read from the
