@@ -36,12 +36,12 @@ import (
 )
 
 // StatusRegex describes the pattern for a raw HTTP Response code.
-var StatusRegex = regexp.MustCompile("(?i)(?:Status:|HTTP\\/[\\d\\.]+)\\s+(\\d{3}.*)")
+var statusRegex = regexp.MustCompile(`(?i)(?:Status:|HTTP\/[\d\.]+)\s+(\d{3}.*)`)
 
 // client implements a SCGI client, which is a standard for
 // interfacing external applications with Web servers.
 type client struct {
-	rwc net.Conn
+	rwc    net.Conn
 	logger *zap.Logger
 }
 
@@ -55,8 +55,8 @@ func (c *client) Do(p map[string]string, req io.Reader) (r io.Reader, err error)
 		// stdlib won't return a negative Content-Length, but we check just in case,
 		// the most likely cause is from a missing content length, which is -1
 		return nil, fmt.Errorf("%v: %v", http.StatusText(http.StatusLengthRequired), err)
-	}	
-	
+	}
+
 	writer := &streamWriter{c: c}
 	writer.buf = bufPool.Get().(*bytes.Buffer)
 	writer.buf.Reset()
@@ -143,7 +143,7 @@ func (c *client) Request(p map[string]string, req io.Reader) (resp *http.Respons
 		if err != nil && err != io.EOF {
 			return
 		}
-		statusLine := StatusRegex.FindStringSubmatch(lineOne)
+		statusLine := statusRegex.FindStringSubmatch(lineOne)
 
 		if len(statusLine) > 1 {
 			statusNumber, statusInfo, statusIsCut := strings.Cut(statusLine[1], " ")
