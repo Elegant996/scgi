@@ -37,11 +37,24 @@ type Transport struct {
 	// The duration used to set a deadline when sending to the SCGI server.
 	WriteTimeout time.Duration
 
-	logger	*zap.Logger
+	logger *zap.Logger
+}
+
+// NewRoundTripper sets up t.
+func NewRoundTripper(logger *zap.Logger) *Transport {
+	t := &Transport{logger: logger}
+
+	// Set a relatively short default dial timeout.
+	// This is helpful to make load-balancer retries more speedy.
+	if t.DialTimeout == 0 {
+		t.DialTimeout = time.Duration(3 * time.Second)
+	}
+
+	return t
 }
 
 // RoundTrip implements http.RoundTripper.
-func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {	
+func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	env, err := t.buildEnv(r)
 	if err != nil {
 		return nil, fmt.Errorf("building environment: %v", err)
@@ -56,12 +69,24 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		address = dialInfo.address
 	}
 
-	logger := t.logger
+	logCreds := false
+	loggableReq := loggableHTTPRequest{
+		Request:              r,
+		shouldLogCredentials: logCreds,
+	}
+	loggableEnv := loggableEnv{vars: env, logCredentials: logCreds}
+
+	logger := t.logger.With(
+		zap.Object("request", loggableReq),
+		zap.Object("env", loggableEnv),
+	)
 	if c := t.logger.Check(zapcore.DebugLevel, "roundtrip"); c != nil {
- 		c.Write(
- 			zap.String("dial", address),
- 		)
- 	}
+		c.Write(
+			zap.String("dial", address),
+			zap.Object("env", loggableEnv),
+			zap.Object("request", loggableReq),
+		)
+	}
 
 	// connect to the backend
 	dialer := net.Dialer{Timeout: time.Duration(t.DialTimeout)}
@@ -129,7 +154,7 @@ func (t Transport) buildEnv(r *http.Request) (envVars, error) {
 	// Remove [] from IPv6 addresses
 	ip = strings.Replace(ip, "[", "", 1)
 	ip = strings.Replace(ip, "]", "", 1)
-	
+
 	fpath := r.URL.Path
 	scriptName := fpath
 
@@ -180,7 +205,7 @@ func (t Transport) buildEnv(r *http.Request) (envVars, error) {
 		"HTTP_HOST":       r.Host, // added here, since not always part of headers
 		"REQUEST_URI":     reqURL.RequestURI(),
 		"SCGI":            "1", // Required
-		"SCRIPT_FILENAME": "", // Not used
+		"SCRIPT_FILENAME": "",  // Not used
 		"SCRIPT_NAME":     scriptName,
 	}
 
@@ -221,6 +246,120 @@ func (t Transport) buildEnv(r *http.Request) (envVars, error) {
 // envVars is a simple type for environment variables.
 type envVars map[string]string
 
+// loggableEnv is a simple type to allow for speeding up zap log encoding.
+type loggableEnv struct {
+	vars           envVars
+	logCredentials bool
+}
+
+// MarshalLogObject satisfies the zapcore.ObjectMarshaler interface.
+func (env loggableEnv) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	for k, v := range env.vars {
+		if !env.logCredentials {
+			switch strings.ToLower(k) {
+			case "http_cookie", "http_set_cookie", "http_authorization", "http_proxy_authorization":
+				v = ""
+			}
+		}
+		enc.AddString(k, v)
+	}
+	return nil
+}
+
+// loggableHTTPRequest makes an HTTP request loggable with zap.Object().
+type loggableHTTPRequest struct {
+	*http.Request
+
+	shouldLogCredentials bool
+}
+
+// MarshalLogObject satisfies the zapcore.ObjectMarshaler interface.
+func (r loggableHTTPRequest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	ip, port, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+		port = ""
+	}
+
+	enc.AddString("remote_ip", ip)
+	enc.AddString("remote_port", port)
+	if varMap, ok := r.Context().Value("vars").(map[string]any); ok {
+		enc.AddString("client_ip", varMap["client_ip"].(string))
+	}
+	enc.AddString("proto", r.Proto)
+	enc.AddString("method", r.Method)
+	enc.AddString("host", r.Host)
+	enc.AddString("uri", r.RequestURI)
+	enc.AddObject("headers", loggableHTTPHeader{
+		Header:               r.Header,
+		ShouldLogCredentials: r.shouldLogCredentials,
+	})
+	if r.TransferEncoding != nil {
+		enc.AddArray("transfer_encoding", loggableStringArray(r.TransferEncoding))
+	}
+	if r.TLS != nil {
+		enc.AddObject("tls", loggableTLSConnState(*r.TLS))
+	}
+	return nil
+}
+
+// loggableHTTPHeader makes an HTTP header loggable with zap.Object().
+// Headers with potentially sensitive information (Cookie, Set-Cookie,
+// Authorization, and Proxy-Authorization) are logged with empty values.
+type loggableHTTPHeader struct {
+	http.Header
+
+	ShouldLogCredentials bool
+}
+
+// MarshalLogObject satisfies the zapcore.ObjectMarshaler interface.
+func (h loggableHTTPHeader) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	if h.Header == nil {
+		return nil
+	}
+	for key, val := range h.Header {
+		if !h.ShouldLogCredentials {
+			switch strings.ToLower(key) {
+			case "cookie", "set-cookie", "authorization", "proxy-authorization":
+				val = []string{"REDACTED"}
+			}
+		}
+		enc.AddArray(key, loggableStringArray(val))
+	}
+	return nil
+}
+
+// loggableStringArray makes a slice of strings marshalable for logging.
+type loggableStringArray []string
+
+// MarshalLogArray satisfies the zapcore.ArrayMarshaler interface.
+func (sa loggableStringArray) MarshalLogArray(enc zapcore.ArrayEncoder) error {
+	if sa == nil {
+		return nil
+	}
+	for _, s := range sa {
+		enc.AppendString(s)
+	}
+	return nil
+}
+
+// loggableTLSConnState makes a TLS connection state loggable with zap.Object().
+type loggableTLSConnState tls.ConnectionState
+
+// MarshalLogObject satisfies the zapcore.ObjectMarshaler interface.
+func (t loggableTLSConnState) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddBool("resumed", t.DidResume)
+	enc.AddUint16("version", t.Version)
+	enc.AddUint16("cipher_suite", t.CipherSuite)
+	enc.AddString("proto", t.NegotiatedProtocol)
+	enc.AddString("server_name", t.ServerName)
+	if len(t.PeerCertificates) > 0 {
+		enc.AddString("client_common_name", t.PeerCertificates[0].Subject.CommonName)
+		enc.AddString("client_serial", t.PeerCertificates[0].SerialNumber.String())
+	}
+	return nil
+}
+
 // DialInfo is a simple type containing connection info.
 type DialInfo struct {
 	network string
@@ -231,7 +370,7 @@ func getDialInfo(u *url.URL) (*DialInfo, bool) {
 	if u.Host == "" {
 		return &DialInfo{"unix", u.Path}, true
 	}
-	
+
 	return nil, false
 }
 
@@ -246,4 +385,12 @@ var tlsProtocolStrings = map[uint16]string{
 var headerNameReplacer = strings.NewReplacer(" ", "_", "-", "_")
 
 // Interface guards
-var _ http.RoundTripper = (*Transport)(nil)
+var (
+	_ zapcore.ObjectMarshaler = (*loggableEnv)(nil)
+	_ zapcore.ObjectMarshaler = (*loggableHTTPRequest)(nil)
+	_ zapcore.ObjectMarshaler = (*loggableHTTPHeader)(nil)
+	_ zapcore.ArrayMarshaler  = (*loggableStringArray)(nil)
+	_ zapcore.ObjectMarshaler = (*loggableTLSConnState)(nil)
+
+	_ http.RoundTripper = (*Transport)(nil)
+)
