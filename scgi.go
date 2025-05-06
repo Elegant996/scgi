@@ -31,13 +31,13 @@ var noopLogger = zap.NewNop()
 // Transport facilitates SCGI communication.
 type Transport struct {
 	// The duration used to set a deadline when connecting to an upstream.
-	DialTimeout time.Duration
+	dialTimeout time.Duration
 
 	// The duration used to set a deadline when reading from the SCGI server.
-	ReadTimeout time.Duration
+	readTimeout time.Duration
 
 	// The duration used to set a deadline when sending to the SCGI server.
-	WriteTimeout time.Duration
+	writeTimeout time.Duration
 
 	logger *zap.Logger
 }
@@ -94,7 +94,7 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	// connect to the backend
-	dialer := net.Dialer{Timeout: time.Duration(t.DialTimeout)}
+	dialer := net.Dialer{Timeout: time.Duration(t.dialTimeout)}
 	conn, err := dialer.DialContext(ctx, network, address)
 	if err != nil {
 		return nil, fmt.Errorf("dialing backend: %v", err)
@@ -113,10 +113,10 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	// read/write timeouts
-	if err := client.SetReadTimeout(t.ReadTimeout); err != nil {
+	if err := client.SetReadTimeout(t.readTimeout); err != nil {
 		return nil, fmt.Errorf("setting read timeout: %v", err)
 	}
-	if err := client.SetWriteTimeout(t.WriteTimeout); err != nil {
+	if err := client.SetWriteTimeout(t.writeTimeout); err != nil {
 		return nil, fmt.Errorf("setting write timeout: %v", err)
 	}
 
@@ -297,7 +297,7 @@ func (r loggableHTTPRequest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("uri", r.RequestURI)
 	enc.AddObject("headers", loggableHTTPHeader{
 		Header:               r.Header,
-		ShouldLogCredentials: r.shouldLogCredentials,
+		shouldLogCredentials: r.shouldLogCredentials,
 	})
 	if r.TransferEncoding != nil {
 		enc.AddArray("transfer_encoding", loggableStringArray(r.TransferEncoding))
@@ -314,7 +314,7 @@ func (r loggableHTTPRequest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 type loggableHTTPHeader struct {
 	http.Header
 
-	ShouldLogCredentials bool
+	shouldLogCredentials bool
 }
 
 // MarshalLogObject satisfies the zapcore.ObjectMarshaler interface.
@@ -323,7 +323,7 @@ func (h loggableHTTPHeader) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 		return nil
 	}
 	for key, val := range h.Header {
-		if !h.ShouldLogCredentials {
+		if !h.shouldLogCredentials {
 			switch strings.ToLower(key) {
 			case "cookie", "set-cookie", "authorization", "proxy-authorization":
 				val = []string{"REDACTED"}
