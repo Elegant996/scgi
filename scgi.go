@@ -50,10 +50,7 @@ func NewRoundTripper(logger *zap.Logger) *Transport {
 	}
 
 	// Set a relatively short default dial timeout.
-	// This is helpful to make load-balancer retries more speedy.
-	if t.DialTimeout == 0 {
-		t.DialTimeout = time.Duration(3 * time.Second)
-	}
+	t.dialTimeout = time.Duration(3 * time.Second)
 
 	return t
 }
