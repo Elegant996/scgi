@@ -35,7 +35,7 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// StatusRegex describes the pattern for a raw HTTP Response code.
+// statusRegex describes the pattern for a raw HTTP Response code.
 var statusRegex = regexp.MustCompile(`(?i)(?:Status:|HTTP\/[\d\.]+)\s+(\d{3}.*)`)
 
 // client implements a SCGI client, which is a standard for
