@@ -26,6 +26,8 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+var noopLogger = zap.NewNop()
+
 // Transport facilitates SCGI communication.
 type Transport struct {
 	// The duration used to set a deadline when connecting to an upstream.
@@ -42,7 +44,10 @@ type Transport struct {
 
 // NewRoundTripper sets up t.
 func NewRoundTripper(logger *zap.Logger) *Transport {
-	t := &Transport{logger: logger}
+	t := &Transport{logger: noopLogger}
+	if logger == nil {
+		t.logger = logger
+	}
 
 	// Set a relatively short default dial timeout.
 	// This is helpful to make load-balancer retries more speedy.
