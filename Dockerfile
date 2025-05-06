@@ -1,6 +1,9 @@
 FROM golang:1.24-alpine AS builder
 
-COPY . ./src
+COPY . ./
+
+# Download dependencies
+RUN go mod download
 
 # Build the application
 RUN go build -o dist/main .
