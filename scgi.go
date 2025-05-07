@@ -71,22 +71,10 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		address = dialInfo.address
 	}
 
-	logCreds := false
-	loggableReq := loggableHTTPRequest{
-		Request:              r,
-		shouldLogCredentials: logCreds,
-	}
-	loggableEnv := loggableEnv{vars: env, logCredentials: logCreds}
-
-	logger := t.logger.With(
-		zap.Object("request", loggableReq),
-		zap.Object("env", loggableEnv),
-	)
+	logger := t.logger
 	if c := t.logger.Check(zapcore.DebugLevel, "roundtrip"); c != nil {
 		c.Write(
 			zap.String("dial", address),
-			zap.Object("env", loggableEnv),
-			zap.Object("request", loggableReq),
 		)
 	}
 
