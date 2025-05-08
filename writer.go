@@ -13,58 +13,53 @@
 package scgi
 
 import (
-	"io"
 	"bytes"
+	"maps"
 	"strconv"
-)
 
-// SCGI requires content length as the first header
-const FirstHeaderKey string = "CONTENT_LENGTH"
+	"github.com/jub0bs/iterutil"
+)
 
 // streamWriter abstracts out the separation of a stream into discrete netstrings.
 type streamWriter struct {
-	c       *client
-	buf     *bytes.Buffer
+	c   *client
+	buf *bytes.Buffer
 }
 
 func (w *streamWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
-// writeNetstring writes all headers to the buffer
 func (w *streamWriter) writeNetstring(pairs map[string]string) error {
-	if v, ok := pairs[FirstHeaderKey]; ok {
-		w.buf.WriteString(FirstHeaderKey)
+	nn := 0
+	if v, ok := pairs["CONTENT_LENGTH"]; ok {
+		n, _ := w.buf.WriteString("CONTENT_LENGTH")
 		w.buf.WriteByte(0x00)
-		w.buf.WriteString(v)
+		m, _ := w.buf.WriteString(v)
 		w.buf.WriteByte(0x00)
-		delete(pairs, FirstHeaderKey)
-	}
-	// write remaining headers
-	for k, v := range pairs {
-		w.buf.WriteString(k)
-		w.buf.WriteByte(0x00)
-		w.buf.WriteString(v)
-		w.buf.WriteByte(0x00)
+		nn += n + m + 2
 	}
 
-	if err := w.writeLength(); err != nil {
-		return err
+	headers := maps.All(pairs)
+	clStr := func(h string, _ string) bool { return h != "CONTENT_LENGTH" }
+	for k, v := range iterutil.Filter2(headers, clStr) {
+		n, _ := w.buf.WriteString(k)
+		w.buf.WriteByte(0x00)
+		m, _ := w.buf.WriteString(v)
+		w.buf.WriteByte(0x00)
+		nn += n + m + 2
 	}
+
+	// store bytes before resetting buffer
+	b := bytes.Clone(w.buf.Bytes())
+	w.buf.Reset()
+
+	// write the netstring
+	w.buf.WriteString(strconv.Itoa(nn))
+	w.buf.WriteByte(':')
+	w.buf.Write(b)
 	w.buf.WriteByte(',')
 
-	return w.FlushStream()
-}
-
-// writeLength writes the buffer length to front of the writer
-func (w *streamWriter) writeLength() error {
-	s := strconv.Itoa(w.buf.Len()) + ":"
-	_, err := io.WriteString(w.c.rwc, s)
-	return err
-}
-
-// Flush write buffer data to the underlying connection
-func (w *streamWriter) FlushStream() error {
 	_, err := w.buf.WriteTo(w.c.rwc)
 	return err
 }
