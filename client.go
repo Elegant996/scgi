@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 // statusRegex describes the pattern for a raw HTTP Response code.
@@ -83,15 +82,6 @@ func (s clientCloser) Close() error {
 	stderr := s.r.stderr.Bytes()
 	if len(stderr) == 0 {
 		return s.rwc.Close()
-	}
-
-	logLevel := zapcore.WarnLevel
-	if s.status >= 400 {
-		logLevel = zapcore.ErrorLevel
-	}
-
-	if c := s.logger.Check(logLevel, "stderr"); c != nil {
-		c.Write(zap.ByteString("body", stderr))
 	}
 
 	return s.rwc.Close()
@@ -160,7 +150,7 @@ func (c *client) Request(p map[string]string, req io.Reader) (resp *http.Respons
 		r:      r.(*streamReader),
 		Reader: rb,
 		status: resp.StatusCode,
-		logger: c.logger,
+		logger: noopLogger,
 	}
 	if chunked(resp.TransferEncoding) {
 		closer.Reader = httputil.NewChunkedReader(rb)

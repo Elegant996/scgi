@@ -45,9 +45,6 @@ type Transport struct {
 // NewRoundTripper sets up t.
 func NewRoundTripper(logger *zap.Logger) *Transport {
 	t := &Transport{logger: noopLogger}
-	if logger == nil {
-		t.logger = logger
-	}
 
 	// Set a relatively short default dial timeout.
 	t.dialTimeout = time.Duration(3 * time.Second)
@@ -72,11 +69,6 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	logger := t.logger
-	if c := t.logger.Check(zapcore.DebugLevel, "roundtrip"); c != nil {
-		c.Write(
-			zap.String("dial", address),
-		)
-	}
 
 	// connect to the backend
 	dialer := net.Dialer{Timeout: time.Duration(t.dialTimeout)}
