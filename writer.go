@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"maps"
 	"strconv"
+	"strings"
 
 	"github.com/jub0bs/iterutil"
 )
@@ -31,33 +32,30 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 }
 
 func (w *streamWriter) writeNetstring(pairs map[string]string) error {
+	var sb strings.Builder
 	nn := 0
 	if v, ok := pairs["CONTENT_LENGTH"]; ok {
-		n, _ := w.buf.WriteString("CONTENT_LENGTH")
-		w.buf.WriteByte(0x00)
-		m, _ := w.buf.WriteString(v)
-		w.buf.WriteByte(0x00)
+		n, _ := sb.WriteString("CONTENT_LENGTH")
+		sb.WriteByte(0x00)
+		m, _ := sb.WriteString(v)
+		sb.WriteByte(0x00)
 		nn += n + m + 2
 	}
 
 	headers := maps.All(pairs)
 	clStr := func(h string, _ string) bool { return h != "CONTENT_LENGTH" }
 	for k, v := range iterutil.Filter2(headers, clStr) {
-		n, _ := w.buf.WriteString(k)
-		w.buf.WriteByte(0x00)
-		m, _ := w.buf.WriteString(v)
-		w.buf.WriteByte(0x00)
+		n, _ := sb.WriteString(k)
+		sb.WriteByte(0x00)
+		m, _ := sb.WriteString(v)
+		sb.WriteByte(0x00)
 		nn += n + m + 2
 	}
-
-	// store bytes before resetting buffer
-	b := bytes.Clone(w.buf.Bytes())
-	w.buf.Reset()
 
 	// write the netstring
 	w.buf.WriteString(strconv.Itoa(nn))
 	w.buf.WriteByte(':')
-	w.buf.Write(b)
+	w.buf.WriteString(sb.String())
 	w.buf.WriteByte(',')
 
 	_, err := w.buf.WriteTo(w.c.rwc)
