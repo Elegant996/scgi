@@ -28,7 +28,6 @@ type streamWriter struct {
 
 func (w *streamWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
-
 }
 
 func (w *streamWriter) writeNetstring(pairs map[string]string) error {
