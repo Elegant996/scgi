@@ -22,37 +22,33 @@ import (
 
 // streamWriter abstracts out the separation of a stream into discrete netstrings.
 type streamWriter struct {
-	c       *client
-	buf     *bytes.Buffer
-	count	int64
+	c   *client
+	buf *bytes.Buffer
 }
 
-func (w *streamWriter) Write(p []byte) (n int, err error) {
-	n, err = w.buf.Write(p)
-	w.count += int64(n)
-	return
+func (w *streamWriter) Write(p []byte) (int, error) {
+	return w.buf.Write(p)
+
 }
 
-// writeNetstring writes all headers to the buffer
 func (w *streamWriter) writeNetstring(pairs map[string]string) error {
-	w.count = 0
+	nn := 0
 	if v, ok := pairs["CONTENT_LENGTH"]; ok {
-		w.buf.WriteString("CONTENT_LENGTH")
+		n, _ := w.buf.WriteString("CONTENT_LENGTH")
 		w.buf.WriteByte(0x00)
-		w.count++
-		w.buf.WriteString(v)
+		m, _ := w.buf.WriteString(v)
 		w.buf.WriteByte(0x00)
-		w.count++
+		nn += n + m + 2
 	}
+
 	headers := maps.All(pairs)
 	clStr := func(h string, _ string) bool { return h != "CONTENT_LENGTH" }
 	for k, v := range iterutil.Filter2(headers, clStr) {
-		w.buf.WriteString(k)
+		n, _ := w.buf.WriteString(k)
 		w.buf.WriteByte(0x00)
-		w.count++
-		w.buf.WriteString(v)
+		m, _ := w.buf.WriteString(v)
 		w.buf.WriteByte(0x00)
-		w.count++
+		nn += n + m + 2
 	}
 
 	// store string before resetting buffer
@@ -60,7 +56,7 @@ func (w *streamWriter) writeNetstring(pairs map[string]string) error {
 	w.buf.Reset()
 
 	// write the netstring
-	w.buf.WriteString(strconv.FormatInt(w.count, 10))
+	w.buf.WriteString(strconv.Itoa(nn))
 	w.buf.WriteByte(':')
 	w.buf.WriteString(s)
 	w.buf.WriteByte(',')
